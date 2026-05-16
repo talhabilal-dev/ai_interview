@@ -25,99 +25,71 @@ const Agent = ({
   const [messages, setMessages] = useState([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [lastMessage, setLastMessage] = useState("");
-  const [endReason, setEndReason] = useState("");
   const [callError, setCallError] = useState("");
+
+  // Keep a ref in sync with messages so the call-end handler
+  // always reads the latest transcript (avoids stale closure bug).
+  const messagesRef = useRef([]);
   const hasFinishedRef = useRef(false);
-
-  const finishCall = (message, isError = false) => {
-    if (hasFinishedRef.current) return;
-
-    hasFinishedRef.current = true;
-    setCallStatus("FINISHED");
-    setEndReason(message || "");
-
-    if (message) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "system",
-          content: `${isError ? "Error" : "Call ended"}: ${message}`,
-        },
-      ]);
-    }
-  };
 
   useEffect(() => {
     const onCallStart = () => {
       hasFinishedRef.current = false;
-      setEndReason("");
+      messagesRef.current = [];
+      setMessages([]);
       setCallError("");
       setCallStatus("ACTIVE");
     };
 
     const onCallEnd = () => {
-      finishCall("The provider ended the meeting.");
+      if (hasFinishedRef.current) return;
+      hasFinishedRef.current = true;
+      setCallStatus("FINISHED");
     };
 
     const onMessage = (message) => {
       if (message.type === "transcript" && message.transcriptType === "final") {
         const newMessage = { role: message.role, content: message.transcript };
+        // Update ref immediately (synchronous) so call-end always sees latest
+        messagesRef.current = [...messagesRef.current, newMessage];
         setMessages((prev) => [...prev, newMessage]);
       }
     };
 
-    const onSpeechStart = () => {
-      setIsSpeaking(true);
-    };
-
-    const onSpeechEnd = () => {
-      setIsSpeaking(false);
-    };
+    const onSpeechStart = () => setIsSpeaking(true);
+    const onSpeechEnd = () => setIsSpeaking(false);
 
     const onError = (error) => {
       console.error("Vapi error event:", error);
-
       try {
         const payload = error?.message || error;
         if (payload?.type === "ejected" || payload?.error?.type === "ejected") {
-          const msg =
-            payload?.message?.msg ||
-            payload?.msg ||
-            payload?.reason ||
-            payload?.error?.msg ||
-            "Meeting has ended";
-          finishCall(msg, false);
+          if (hasFinishedRef.current) return;
+          hasFinishedRef.current = true;
+          setCallStatus("FINISHED");
         }
       } catch (e) {
         console.error("Error processing vapi error payload:", e);
       }
     };
 
-    const onEjected = (payload) => {
-      const msg =
-        payload?.message?.msg ||
-        payload?.msg ||
-        payload?.reason ||
-        payload?.error?.msg ||
-        "Meeting has ended";
-      finishCall(msg, false);
+    const onEjected = () => {
+      if (hasFinishedRef.current) return;
+      hasFinishedRef.current = true;
+      setCallStatus("FINISHED");
     };
 
     const onDailyError = (payload) => {
-      const msg =
-        payload?.errorMsg ||
-        payload?.message?.msg ||
-        payload?.message ||
-        payload?.error?.msg ||
-        "Meeting has ended";
-
-      if (payload?.error?.type === "ejected" || payload?.message?.type === "ejected") {
-        finishCall(msg, false);
+      if (
+        payload?.error?.type === "ejected" ||
+        payload?.message?.type === "ejected"
+      ) {
+        if (hasFinishedRef.current) return;
+        hasFinishedRef.current = true;
+        setCallStatus("FINISHED");
         return;
       }
-
       console.error("Vapi daily-error event:", payload);
-      finishCall(msg, true);
     };
 
     vapi.on("call-start", onCallStart);
@@ -141,16 +113,38 @@ const Agent = ({
     };
   }, []);
 
+  // Update last message for the transcript display
   useEffect(() => {
     if (messages.length > 0) {
       setLastMessage(messages[messages.length - 1].content);
     }
+  }, [messages]);
 
-    const handleGenerateFeedback = async (transcriptMessages) => {
+  // Handle post-call logic — runs when callStatus becomes "FINISHED".
+  // Uses messagesRef (not messages state) to avoid the stale closure problem
+  // where messages would be [] because React state hadn't updated yet.
+  useEffect(() => {
+    if (callStatus !== "FINISHED") return;
+
+    if (type === "generate") {
+      router.push("/");
+      return;
+    }
+
+    const transcript = messagesRef.current;
+    console.log("Generating feedback with transcript length:", transcript.length);
+
+    if (transcript.length === 0) {
+      console.warn("Transcript empty — no messages captured. Redirecting home.");
+      router.push("/");
+      return;
+    }
+
+    const handleGenerateFeedback = async () => {
       const { success, feedbackId: id } = await createFeedback({
         interviewId,
         userId,
-        transcript: transcriptMessages,
+        transcript,
         feedbackId,
       });
 
@@ -161,29 +155,14 @@ const Agent = ({
       }
     };
 
-    if (callStatus === "FINISHED") {
-      if (type === "generate") {
-        router.push("/");
-      } else {
-        handleGenerateFeedback(messages);
-      }
-    }
-  }, [messages, callStatus, feedbackId, interviewId, router, type, userId]);
+    handleGenerateFeedback();
+  }, [callStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleCall = async () => {
     setCallError("");
 
-    try {
-      if (!navigator?.mediaDevices?.getUserMedia) {
-        throw new Error("Your browser does not support microphone access.");
-      }
-
-      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStream.getTracks().forEach((track) => track.stop());
-    } catch (micError) {
-      console.error("Microphone permission error:", micError);
-      setCallStatus("INACTIVE");
-      setCallError("Microphone access is blocked or unavailable. Allow mic permissions and try again.");
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setCallError("Your browser does not support microphone access.");
       return;
     }
 
@@ -191,36 +170,27 @@ const Agent = ({
 
     try {
       if (type === "generate") {
-        const res = await vapi.start(
-          "d31d6f74-5e12-4c69-8e20-c04f364e798f"
-        );
-        console.log("vapi.start (generate) result:", res);
+        await vapi.start("d31d6f74-5e12-4c69-8e20-c04f364e798f");
       } else {
         const formattedQuestions = questions
-          ? questions.map((question) => `- ${question}`).join("\n")
+          ? questions.map((q) => `- ${q}`).join("\n")
           : "";
 
-        const techstackString = Array.isArray(techstack) ? techstack.join(", ") : techstack;
+        const techstackString = Array.isArray(techstack)
+          ? techstack.join(", ")
+          : techstack;
 
-        const res = await vapi.start(
-          interviewer,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          {
-            roomDeleteOnUserLeaveEnabled: false,
-            variableValues: {
-              questions: formattedQuestions,
-              role: role || "Developer",
-              level: level || "Mid-level",
-              techstack: techstackString || "N/A",
-              type: type || "Technical",
-            },
-          }
-        );
+        const assistantOverrides = {
+          variableValues: {
+            questions: formattedQuestions,
+            role: role || "Developer",
+            level: level || "Mid-level",
+            techstack: techstackString || "N/A",
+            type: type || "Technical",
+          },
+        };
 
-        console.log("vapi.start (interviewer) result:", res);
+        await vapi.start(interviewer, assistantOverrides);
       }
     } catch (err) {
       console.error("vapi.start error:", err);
@@ -230,8 +200,8 @@ const Agent = ({
   };
 
   const handleDisconnect = () => {
-    finishCall("You ended the meeting.");
     vapi.stop();
+    // onCallEnd will fire and set callStatus to FINISHED
   };
 
   return (
@@ -281,12 +251,6 @@ const Agent = ({
         </div>
       )}
 
-      {callStatus === "FINISHED" && endReason ? (
-        <p className="mt-4 text-sm text-light-100 text-center max-w-xl mx-auto">
-          {endReason}
-        </p>
-      ) : null}
-
       {callError ? (
         <p className="mt-4 text-sm text-destructive-100 text-center max-w-xl mx-auto">
           {callError}
@@ -302,9 +266,10 @@ const Agent = ({
                 callStatus !== "CONNECTING" && "hidden"
               )}
             />
-
             <span className="relative">
-              {callStatus === "INACTIVE" || callStatus === "FINISHED" ? "Call" : ". . ."}
+              {callStatus === "INACTIVE" || callStatus === "FINISHED"
+                ? "Call"
+                : ". . ."}
             </span>
           </button>
         ) : (

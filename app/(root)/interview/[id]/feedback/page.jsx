@@ -9,6 +9,7 @@ import {
 } from "@/lib/actions/general.action";
 import { Button } from "@/components/ui/button";
 import { getCurrentUser } from "@/lib/actions/auth.action";
+import RetryScoring from "@/components/RetryScoring";
 
 const Feedback = async ({ params }) => {
   const { id } = await params;
@@ -22,6 +23,11 @@ const Feedback = async ({ params }) => {
     userId: user?.id,
   });
 
+  // If no feedback doc at all, go back
+  if (!feedback) redirect("/");
+
+  const isPending = feedback.status === "transcript_saved" || !feedback.totalScore;
+
   return (
     <section className="section-feedback">
       <div className="flex flex-row justify-center">
@@ -31,66 +37,76 @@ const Feedback = async ({ params }) => {
         </h1>
       </div>
 
-      <div className="flex flex-row justify-center ">
-        <div className="flex flex-row gap-5">
-          {/* Overall Impression */}
-          <div className="flex flex-row gap-2 items-center">
-            <Image src="/star.svg" width={22} height={22} alt="star" />
-            <p>
-              Overall Impression:{" "}
-              <span className="text-primary-200 font-bold">
-                {feedback?.totalScore}
-              </span>
-              /100
-            </p>
-          </div>
-
-          {/* Date */}
-          <div className="flex flex-row gap-2">
-            <Image src="/calendar.svg" width={22} height={22} alt="calendar" />
-            <p>
-              {feedback?.createdAt
-                ? dayjs(feedback.createdAt).format("MMM D, YYYY h:mm A")
-                : "N/A"}
-            </p>
-          </div>
+      {isPending ? (
+        // Transcript saved but Gemini hasn't scored it yet
+        <div className="flex flex-col items-center gap-4 py-8">
+          <p className="text-light-100 text-center max-w-lg">
+            Your interview transcript was saved successfully. The AI scoring
+            didn&apos;t complete — click below to generate your score now.
+          </p>
+          <RetryScoring feedbackId={feedback.id} interviewId={id} />
         </div>
-      </div>
+      ) : (
+        <>
+          <div className="flex flex-row justify-center">
+            <div className="flex flex-row gap-5">
+              <div className="flex flex-row gap-2 items-center">
+                <Image src="/star.svg" width={22} height={22} alt="star" />
+                <p>
+                  Overall Impression:{" "}
+                  <span className="text-primary-200 font-bold">
+                    {feedback?.totalScore}
+                  </span>
+                  /100
+                </p>
+              </div>
 
-      <hr />
-
-      <p>{feedback?.finalAssessment}</p>
-
-      {/* Interview Breakdown */}
-      <div className="flex flex-col gap-4">
-        <h2>Breakdown of the Interview:</h2>
-        {feedback?.categoryScores?.map((category, index) => (
-          <div key={index}>
-            <p className="font-bold">
-              {index + 1}. {category.name} ({category.score}/100)
-            </p>
-            <p>{category.comment}</p>
+              <div className="flex flex-row gap-2">
+                <Image src="/calendar.svg" width={22} height={22} alt="calendar" />
+                <p>
+                  {feedback?.createdAt
+                    ? dayjs(feedback.createdAt).format("MMM D, YYYY h:mm A")
+                    : "N/A"}
+                </p>
+              </div>
+            </div>
           </div>
-        ))}
-      </div>
 
-      <div className="flex flex-col gap-3">
-        <h3>Strengths</h3>
-        <ul>
-          {feedback?.strengths?.map((strength, index) => (
-            <li key={index}>{strength}</li>
-          ))}
-        </ul>
-      </div>
+          <hr />
 
-      <div className="flex flex-col gap-3">
-        <h3>Areas for Improvement</h3>
-        <ul>
-          {feedback?.areasForImprovement?.map((area, index) => (
-            <li key={index}>{area}</li>
-          ))}
-        </ul>
-      </div>
+          <p>{feedback?.finalAssessment}</p>
+
+          <div className="flex flex-col gap-4">
+            <h2>Breakdown of the Interview:</h2>
+            {feedback?.categoryScores?.map((category, index) => (
+              <div key={index}>
+                <p className="font-bold">
+                  {index + 1}. {category.name} ({category.score}/100)
+                </p>
+                <p>{category.comment}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <h3>Strengths</h3>
+            <ul>
+              {feedback?.strengths?.map((strength, index) => (
+                <li key={index}>{strength}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <h3>Areas for Improvement</h3>
+            <ul>
+              {feedback?.areasForImprovement?.map((area, index) => (
+                <li key={index}>{area}</li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
 
       <div className="buttons">
         <Button className="btn-secondary flex-1">
@@ -102,10 +118,7 @@ const Feedback = async ({ params }) => {
         </Button>
 
         <Button className="btn-primary flex-1">
-          <Link
-            href={`/interview/${id}`}
-            className="flex w-full justify-center"
-          >
+          <Link href={`/interview/${id}`} className="flex w-full justify-center">
             <p className="text-sm font-semibold text-black text-center">
               Retake Interview
             </p>
